@@ -1,0 +1,153 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+#include <QPainter>
+#include <cstdlib>
+#include <ctime>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QMainWindow(parent)
+    , ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+
+    resize(MAP_W*TILE, MAP_H*TILE);
+
+    srand(time(nullptr));
+
+    inventory[DIRT] = 10;
+
+    if(!tilemap.load(":/assets/tilemap.png"))
+        qDebug() << "❌ tilemap加载失败";
+    else
+        qDebug() << "✅ tilemap加载成功";
+
+    initMap();
+
+    moveTimer.setInterval(60);
+    connect(&moveTimer,&QTimer::timeout,this,[=]{
+        canMove = true;
+    });
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+//================= 初始化地图 =================
+void MainWindow::initMap()
+{
+    for(int y=0;y<MAP_H;y++)
+        for(int x=0;x<MAP_W;x++)
+        {
+            if(y == MAP_H-1)
+                map[y][x] = STONE;
+            else if(rand()%6==0)
+                map[y][x] = DIRT;
+            else
+                map[y][x] = AIR;
+        }
+}
+
+//================= 贴图系统 =================
+QRect MainWindow::getTile(int type)
+{
+    return QRect(type*32,0,32,32);
+}
+
+//================= 碰撞 =================
+bool MainWindow::isBlocked(int x,int y)
+{
+    if(x<0||y<0||x>=MAP_W||y>=MAP_H)
+        return true;
+
+    return map[y][x] != AIR;
+}
+
+//================= 渲染 =================
+void MainWindow::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+
+    for(int y=0;y<MAP_H;y++)
+        for(int x=0;x<MAP_W;x++)
+        {
+            int t = map[y][x];
+
+            if(t != AIR)
+            {
+                QRect src = getTile(t);
+
+                p.drawPixmap(x*TILE, y*TILE,
+                             TILE, TILE,
+                             tilemap,
+                             src.x(), src.y(),
+                             32, 32);
+            }
+        }
+
+    p.setBrush(Qt::red);
+    p.drawRect(playerX*TILE, playerY*TILE, TILE, TILE);
+}
+
+//================= 键盘 =================
+void MainWindow::keyPressEvent(QKeyEvent *e)
+{
+    keys.insert(e->key());
+
+    if(!canMove) return;
+
+    int nx = playerX;
+    int ny = playerY;
+
+    if(keys.contains(Qt::Key_W)) ny--;
+    if(keys.contains(Qt::Key_S)) ny++;
+    if(keys.contains(Qt::Key_A)) nx--;
+    if(keys.contains(Qt::Key_D)) nx++;
+
+    if(!isBlocked(nx,ny))
+    {
+        playerX = nx;
+        playerY = ny;
+    }
+
+    canMove = false;
+    moveTimer.start();
+
+    update();
+}
+
+void MainWindow::keyReleaseEvent(QKeyEvent *e)
+{
+    keys.remove(e->key());
+}
+
+//================= 鼠标（挖/放） =================
+void MainWindow::mousePressEvent(QMouseEvent *e)
+{
+    int x = e->pos().x()/TILE;
+    int y = e->pos().y()/TILE;
+
+    if(abs(x-playerX)>1 || abs(y-playerY)>1)
+        return;
+
+    if(e->button()==Qt::LeftButton)
+    {
+        if(map[y][x] != AIR)
+        {
+            map[y][x] = AIR;
+            inventory[DIRT]++;
+        }
+    }
+
+    if(e->button()==Qt::RightButton)
+    {
+        if(map[y][x] == AIR && inventory[DIRT] > 0)
+        {
+            map[y][x] = DIRT;
+            inventory[DIRT]--;
+        }
+    }
+
+    update();
+}
