@@ -1,0 +1,64 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QWidget>
+#include <QVector>
+#include <QPixmap>
+#include <QTimer>
+
+class MainWindow : public QWidget
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+
+private slots:
+    void onAnimationTimer();
+
+private:
+    // 地图数据
+    QVector<QVector<int>> layers;
+    bool canMoveTo(int nextX,int nextY);
+    int mapWidth = 20;
+    int mapHeight = 20;
+    int tileSize = 16;
+
+    // 角色位置与属性
+    int playerX = 100;
+    int playerY = 100;
+    int speed = 4;
+
+    // === 移动控制 ===
+    QTimer *moveTimer;
+
+    bool keyW = false;
+    bool keyA = false;
+    bool keyS = false;
+    bool keyD = false;
+
+    // === 门系统 ===
+    void updatePlayer();
+    void openDoor(int tx, int ty);
+    void tryOpenDoor();
+    // 动画逻辑
+    QPixmap playerSheet;    // 加载 image_8496fa.jpg
+    int currentFrame = 0;   // 动作帧 (0-2)
+    int currentDir = 0;     // 0:下, 1:左, 2:右, 3:上
+    bool isMoving = false;
+    QTimer *animTimer;
+
+    // 精灵图切片参数 (针对该图片测量)
+    const int spriteW = 48; // 原图中单个角色的宽度
+    const int spriteH = 50; // 原图中单个角色的高度
+    const int renderSize = 20; // 渲染到屏幕的大小
+
+    void loadTMX();
+};
+
+#endif
