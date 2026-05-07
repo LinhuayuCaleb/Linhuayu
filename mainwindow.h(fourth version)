@@ -1,0 +1,169 @@
+// mainwindow.h
+
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QWidget>
+#include <QVector>
+#include <QPixmap>
+#include <QTimer>
+#include <QPoint>
+#include <QRect>
+#include <QKeyEvent>
+#include <QMovie>
+#include <QRandomGenerator>
+
+class MainWindow : public QWidget
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+
+private slots:
+    void onAnimationTimer();
+
+private:
+
+    // =========================
+    // 地图
+    // =========================
+    QVector<QVector<int>> layers;
+
+    int mapWidth = 30;
+    int mapHeight = 20;
+    int tileSize = 16;
+
+    void loadTMX();
+
+    // =========================
+    // 玩家
+    // =========================
+    int playerX = 100;
+    int playerY = 100;
+
+    float speed = 0;
+    float targetSpeed = 2.0;
+
+    int currentFrame = 0;
+    int currentDir = 0;
+
+    bool isMoving = false;
+
+    // W A S D
+    bool keyW = false;
+    bool keyA = false;
+    bool keyS = false;
+    bool keyD = false;
+
+    // =========================
+    // 角色贴图
+    // =========================
+    QPixmap playerSheet;
+
+    const int spriteW = 48;
+    const int spriteH = 50;
+    const int renderSize = 20;
+
+    // =========================
+    // 定时器
+    // =========================
+    QTimer *moveTimer;
+    QTimer *animTimer;
+
+    // =========================
+    // 室内系统
+    // =========================
+    bool insideHouse = false;
+
+    QPoint indoorSpawn = QPoint(160,160);
+
+    QRect indoorBounds =
+        QRect(40,40,280,180);
+
+    QPoint currentDoor;
+
+    // =========================
+    // 门系统
+    // =========================
+    QVector<int> closedDoorTiles =
+        {
+            85,89,
+            93,97,
+            101,105,
+            109,113
+        };
+
+    QVector<int> openedDoorTiles =
+        {
+            74,78,
+            82,86,
+            90,94,
+            98,102
+        };
+
+    bool isClosedDoor(int id);
+    bool isOpenedDoor(int id);
+
+    int getOpenedDoor(int closedID);
+    int getClosedDoor(int openID);
+
+    // =========================
+    // 功能
+    // =========================
+    bool canMoveTo(int nextX,
+                   int nextY);
+
+    void updatePlayer();
+
+    void updateSpeedByTerrain();
+
+    void tryOpenDoor();
+
+    void openDoor(int tx,
+                  int ty);
+    // =========================
+    // 表情系统
+    // =========================
+
+    QVector<QMovie*> emotionMovies;
+
+    QMovie* currentEmotion = nullptr;
+
+    QTimer* emotionTimer;
+
+    bool showEmotion = false;
+
+    int timeOfDay = 0;   // 0~1000
+    bool isNight = false;
+    struct EmotionItem
+    {
+        QMovie* movie;
+        QString name;
+        bool dayOnly;
+        bool nightOnly;
+    };
+
+    QVector<EmotionItem> emotionItems;
+
+    // =========================
+    // 🌸 种花系统
+    // =========================
+
+    struct Flower
+    {
+        int stage = 0;          // 0=无花，1~8生长
+        qint64 startTime = 0;   // 种下时间
+        bool active = false;
+    };
+
+    Flower flowers[20][30];     // 和地图一致 20x30
+    QTimer *flowerTimer;
+};
+
+#endif
