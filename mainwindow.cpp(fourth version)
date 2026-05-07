@@ -1,0 +1,937 @@
+// mainwindow.cpp
+
+#include "mainwindow.h"
+
+#include <QPainter>
+#include <QFile>
+#include <QXmlStreamReader>
+#include <QDebug>
+
+MainWindow::MainWindow(QWidget *parent)
+    : QWidget(parent)
+{
+    loadTMX();
+
+    // =========================
+    // 玩家贴图
+    // =========================
+    if(!playerSheet.load("Caleb_Walk.png"))
+    {
+        qDebug() << "Cannot find Caleb_Walk.png";
+    }
+
+    // =========================
+    // 窗口
+    // =========================
+    double scaleFactor = 2.0;
+
+    setFixedSize(
+        mapWidth * tileSize * scaleFactor,
+        mapHeight * tileSize * scaleFactor
+        );
+
+    setFocusPolicy(Qt::StrongFocus);
+
+    // =========================
+    // 室内房间居中
+    // =========================
+    int roomW = 280;
+    int roomH = 180;
+
+    int logicalW =
+        mapWidth * tileSize;
+
+    int logicalH =
+        mapHeight * tileSize;
+
+    int roomX =
+        (logicalW - roomW) / 2;
+
+    int roomY =
+        (logicalH - roomH) / 2;
+
+    indoorBounds =
+        QRect(roomX,
+              roomY,
+              roomW,
+              roomH);
+
+    indoorSpawn =
+        QPoint(
+            indoorBounds.center().x(),
+            indoorBounds.center().y()
+            );
+
+    // =========================
+    // 动画
+    // =========================
+    animTimer = new QTimer(this);
+
+    connect(animTimer,
+            &QTimer::timeout,
+            this,
+            &MainWindow::onAnimationTimer);
+
+    animTimer->start(120);
+
+    QTimer* timeTimer = new QTimer(this);
+
+    connect(timeTimer, &QTimer::timeout, this, [=]()
+            {
+                timeOfDay += 1;
+
+                if(timeOfDay > 1000)
+                    timeOfDay = 0;
+
+                // 白天 / 夜晚判断
+                isNight = (timeOfDay > 600);
+
+                update();
+            });
+
+    timeTimer->start(50);
+
+    // =========================
+    // 移动
+    // =========================
+    moveTimer = new QTimer(this);
+
+    connect(moveTimer,
+            &QTimer::timeout,
+            this,
+            &MainWindow::updatePlayer);
+
+    moveTimer->start(16);
+    // =========================
+    // GIF表情加载
+    // =========================
+
+    // 普通表情（不受昼夜影响）
+    emotionItems.append({new QMovie("happy.gif"), "happy", false, false});
+    emotionItems.append({new QMovie("funny.gif"), "funny", false, false});
+    emotionItems.append({new QMovie("hug.gif"), "hug", false, false});
+    emotionItems.append({new QMovie("tired.gif"), "tired", false, false});
+    emotionItems.append({new QMovie("comfort.gif"), "comfort", false, false});
+    emotionItems.append({new QMovie("celebrate.gif"), "celebrate", false, false});
+
+    // 🌞 只有白天
+    emotionItems.append({new QMovie("goodmorning.gif"), "goodmorning", true, false});
+
+    // 🌙 只有夜晚
+    emotionItems.append({new QMovie("goodnight.gif"), "goodnight", false, true});
+
+    // =========================
+    // 表情随机刷新
+    // =========================
+
+
+    if(!emotionTimer)
+    {
+        emotionTimer = new QTimer(this);
+
+        connect(emotionTimer, &QTimer::timeout, this, [=]()
+                {
+                    QVector<EmotionItem> pool;
+
+                    for(const auto &e : emotionItems)
+                    {
+                        // 🌞 夜晚屏蔽 morning
+                        if(isNight && e.dayOnly)
+                            continue;
+
+                        // 🌙 白天屏蔽 night
+                        if(!isNight && e.nightOnly)
+                            continue;
+
+                        pool.append(e);
+                    }
+
+                    if(pool.isEmpty())
+                        return;
+
+                    int index =
+                        QRandomGenerator::global()->bounded(pool.size());
+
+                    currentEmotion = pool[index].movie;
+
+                    if(currentEmotion)
+                    {
+                        currentEmotion->start();
+                    }
+
+                    showEmotion = true;
+
+                    update();
+                });
+
+        emotionTimer->start(3000);
+    }
+    // =========================
+    // 🌸 花生长系统
+    // =========================
+    flowerTimer = new QTimer(this);
+
+    connect(flowerTimer, &QTimer::timeout, this, [=]()
+            {
+                qint64 now = QDateTime::currentMSecsSinceEpoch();
+
+                for(int y = 0; y < mapHeight; y++)
+                {
+                    for(int x = 0; x < mapWidth; x++)
+                    {
+                        Flower &f = flowers[y][x];
+
+                        if(!f.active) continue;
+
+                        int minutes = (now - f.startTime) / 60000;
+
+                        if(minutes >= 120) f.stage = 8;
+                        else if(minutes >= 105) f.stage = 7;
+                        else if(minutes >= 90) f.stage = 6;
+                        else if(minutes >= 75) f.stage = 5;
+                        else if(minutes >= 60) f.stage = 4;
+                        else if(minutes >= 45) f.stage = 3;
+                        else if(minutes >= 30) f.stage = 2;
+                        else f.stage = 1;
+                    }
+                }
+
+                update();
+            });
+
+    flowerTimer->start(60000); // 每分钟更新一次
+}
+
+void MainWindow::loadTMX()
+{
+    QFile file("map.tmx");
+
+    if(!file.open(QIODevice::ReadOnly))
+        return;
+
+    QXmlStreamReader xml(&file);
+
+    while(!xml.atEnd())
+    {
+        xml.readNext();
+
+        if(xml.isStartElement() &&
+            xml.name() == "data")
+        {
+            QString data =
+                xml.readElementText();
+
+            QStringList list =
+                data.split(",");
+
+            QVector<int> layer;
+
+            for(QString s : list)
+            {
+                layer.append(
+                    s.trimmed().toInt()
+                    );
+            }
+
+            layers.append(layer);
+        }
+    }
+
+    file.close();
+}
+
+bool MainWindow::isClosedDoor(int id)
+{
+    return id == 85 ||
+           id == 89;
+}
+
+bool MainWindow::isOpenedDoor(int id)
+{
+    return id == 74 ||
+           id == 78;
+}
+
+int MainWindow::getOpenedDoor(int closedID)
+{
+    if(closedID == 85)
+        return 74;
+
+    if(closedID == 89)
+        return 78;
+
+    return closedID;
+}
+
+int MainWindow::getClosedDoor(int openID)
+{
+    if(openID == 74)
+        return 85;
+
+    if(openID == 78)
+        return 89;
+
+    return openID;
+}
+
+bool MainWindow::canMoveTo(int nextX,
+                           int nextY)
+{
+    // =========================
+    // 室内碰撞
+    // =========================
+    if(insideHouse)
+    {
+        QRect playerRect(
+            nextX,
+            nextY,
+            16,
+            16
+            );
+
+        return indoorBounds.contains(
+            playerRect
+            );
+    }
+
+    int size = 16;
+
+    // =========================
+    // 地图边界
+    // =========================
+    if(nextX < 0 ||
+        nextY < 0 ||
+        nextX + size >
+            mapWidth * tileSize ||
+        nextY + size >
+            mapHeight * tileSize)
+    {
+        return false;
+    }
+
+    QVector<QPoint> points =
+        {
+            QPoint(nextX,nextY),
+            QPoint(nextX+15,nextY),
+            QPoint(nextX,nextY+15),
+            QPoint(nextX+15,nextY+15)
+        };
+
+    for(auto &p : points)
+    {
+        int tx = p.x() / tileSize;
+        int ty = p.y() / tileSize;
+
+        int index =
+            ty * mapWidth + tx;
+
+        // =========================
+        // 房屋层碰撞
+        // =========================
+        if(1 < layers.size())
+        {
+            const auto &houseLayer =
+                layers[1];
+
+            if(index >= 0 &&
+                index < houseLayer.size())
+            {
+                int tileID =
+                    houseLayer[index];
+
+                // 关闭门阻挡
+                if(isClosedDoor(tileID))
+                {
+                    return false;
+                }
+
+                // 开门允许通过
+                if(isOpenedDoor(tileID))
+                {
+                    continue;
+                }
+
+                // 房顶阻挡
+                if(tileID >= 49)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // =========================
+        // 树木阻挡
+        // =========================
+        if(3 < layers.size())
+        {
+            const auto &treeLayer =
+                layers[3];
+
+            if(index >= 0 &&
+                index < treeLayer.size())
+            {
+                if(treeLayer[index] != 0)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+void MainWindow::updateSpeedByTerrain()
+{
+    if(insideHouse)
+    {
+        targetSpeed = 2.0;
+        return;
+    }
+
+    int tx =
+        (playerX + 8) / tileSize;
+
+    int ty =
+        (playerY + 8) / tileSize;
+
+    int index =
+        ty * mapWidth + tx;
+
+    targetSpeed = 2.0;
+
+    // 草地减速
+    if(0 < layers.size())
+    {
+        const auto &grass =
+            layers[0];
+
+        if(index < grass.size() &&
+            grass[index] == 1)
+        {
+            targetSpeed = 1.5;
+        }
+    }
+
+    // 马路加速
+    if(2 < layers.size())
+    {
+        const auto &road =
+            layers[2];
+
+        if(index < road.size() &&
+            road[index] != 0)
+        {
+            targetSpeed = 2.8;
+        }
+    }
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event)
+{
+    if(event->isAutoRepeat())
+        return;
+
+    if(event->key() == Qt::Key_W)
+        keyW = true;
+
+    if(event->key() == Qt::Key_S)
+        keyS = true;
+
+    if(event->key() == Qt::Key_A)
+        keyA = true;
+
+    if(event->key() == Qt::Key_D)
+        keyD = true;
+
+    if(event->key() == Qt::Key_E)
+    {
+        tryOpenDoor();
+    }
+    if(event->key() == Qt::Key_N)
+    {
+        isNight = !isNight;
+
+        // 同步时间（避免冲突）
+        timeOfDay = isNight ? 800 : 200;
+
+        update();
+    }
+    if(event->key() == Qt::Key_G)
+    {
+        int tx = playerX / tileSize;
+        int ty = playerY / tileSize;
+
+        if(tx >= 0 && tx < mapWidth &&
+            ty >= 0 && ty < mapHeight)
+        {
+            Flower &f = flowers[ty][tx];
+
+            if(!f.active)
+            {
+                f.active = true;
+                f.stage = 1;
+                f.startTime =
+                    QDateTime::currentMSecsSinceEpoch();
+            }
+        }
+    }
+}
+
+void MainWindow::keyReleaseEvent(QKeyEvent *event)
+{
+    if(event->isAutoRepeat())
+        return;
+
+    if(event->key() == Qt::Key_W)
+        keyW = false;
+
+    if(event->key() == Qt::Key_S)
+        keyS = false;
+
+    if(event->key() == Qt::Key_A)
+        keyA = false;
+
+    if(event->key() == Qt::Key_D)
+        keyD = false;
+}
+
+void MainWindow::paintEvent(QPaintEvent *)
+{
+    QPainter painter(this);
+
+    double scaleFactor = 2.0;
+    painter.scale(scaleFactor, scaleFactor);
+
+    QPixmap tileset("tiles.png");
+
+    int columns = tileset.width() / tileSize;
+
+    // =========================================================
+    // 1️⃣ 室外地图层
+    // =========================================================
+    if(!insideHouse)
+    {
+        for(int l = 0; l < layers.size(); l++)
+        {
+            if(l == 1) continue; // 房屋层跳过
+
+            const auto &layer = layers[l];
+
+            for(int i = 0; i < layer.size(); i++)
+            {
+                int id = layer[i];
+                if(id == 0) continue;
+
+                int realID = id - 1;
+
+                int sx = (realID % columns) * tileSize;
+                int sy = (realID / columns) * tileSize;
+
+                int dx = (i % mapWidth) * tileSize;
+                int dy = (i / mapWidth) * tileSize;
+
+                painter.drawPixmap(dx, dy,
+                                   tileset,
+                                   sx, sy,
+                                   tileSize, tileSize);
+            }
+            // =========================
+            // 🌸 花覆盖层（新增）
+            // =========================
+            QPixmap flowerSheet("flower.png"); // 或 tileset
+
+            for(int y = 0; y < mapHeight; y++)
+            {
+                for(int x = 0; x < mapWidth; x++)
+                {
+                    Flower &f = flowers[y][x];
+
+                    if(!f.active) continue;
+
+                    int gid = 132 + f.stage; // ⚠️ 按你 flower.tsx 起始id调整
+
+                    int columns = 12;
+                    int tile = 16;
+
+                    int sx = (gid % columns) * tile;
+                    int sy = (gid / columns) * tile;
+
+                    int dx = x * tileSize;
+                    int dy = y * tileSize;
+
+                    painter.drawPixmap(dx, dy,
+                                       flowerSheet,
+                                       sx, sy,
+                                       tileSize, tileSize);
+                }
+            }
+        }
+
+        // =========================================================
+        // 2️⃣ 房屋底层
+        // =========================================================
+        const auto &houseLayer = layers[1];
+
+        for(int i = 0; i < houseLayer.size(); i++)
+        {
+            int id = houseLayer[i];
+            if(id == 0) continue;
+
+            if(id >= 49 && !isClosedDoor(id) && !isOpenedDoor(id))
+                continue;
+
+            int realID = id - 1;
+
+            int sx = (realID % columns) * tileSize;
+            int sy = (realID / columns) * tileSize;
+
+            int dx = (i % mapWidth) * tileSize;
+            int dy = (i / mapWidth) * tileSize;
+
+            painter.drawPixmap(dx, dy,
+                               tileset,
+                               sx, sy,
+                               tileSize, tileSize);
+        }
+    }
+    else
+    {
+        // =========================================================
+        // 3️⃣ 室内
+        // =========================================================
+        int logicalW = width() / 2;
+        int logicalH = height() / 2;
+
+        painter.fillRect(0, 0, logicalW, logicalH,
+                         QColor(70, 50, 35));
+
+        painter.fillRect(indoorBounds.x() - 12,
+                         indoorBounds.y() - 12,
+                         indoorBounds.width() + 24,
+                         indoorBounds.height() + 24,
+                         QColor(85, 55, 40));
+
+        painter.fillRect(indoorBounds,
+                         QColor(120, 85, 55));
+    }
+
+    // =========================================================
+    // 4️⃣ 阴影
+    // =========================================================
+    painter.setBrush(QColor(0, 0, 0, 80));
+    painter.setPen(Qt::NoPen);
+
+    painter.drawEllipse(playerX - 4,
+                        playerY + 10,
+                        16, 6);
+
+    // =========================================================
+    // 5️⃣ 玩家（角色层）
+    // =========================================================
+    if(!playerSheet.isNull())
+    {
+        int srcW = playerSheet.width() / 4;
+        int srcH = playerSheet.height() / 4;
+
+        int row = 0;
+        bool mirror = false;
+
+        if(currentDir == 0) row = 0;
+        else if(currentDir == 3) row = 2;
+        else if(currentDir == 2) { row = 1; mirror = true; }
+        else if(currentDir == 1) row = 1;
+
+        QRect sourceRect(
+            currentFrame * srcW,
+            row * srcH,
+            srcW,
+            srcH
+            );
+
+        QRect targetRect(
+            playerX - 4,
+            playerY - 4,
+            24,
+            24
+            );
+
+        if(mirror)
+        {
+            QImage img = playerSheet.copy(sourceRect).toImage();
+            painter.drawImage(targetRect, img.mirrored(true, false));
+        }
+        else
+        {
+            painter.drawPixmap(targetRect, playerSheet, sourceRect);
+        }
+    }
+    // =========================================================
+    // 7️⃣ 房顶遮挡层（最后画，避免穿帮）
+    // =========================================================
+    if(!insideHouse)
+    {
+        const auto &houseLayer = layers[1];
+
+        for(int i = 0; i < houseLayer.size(); i++)
+        {
+            int id = houseLayer[i];
+
+            if(id < 49 || isClosedDoor(id) || isOpenedDoor(id))
+                continue;
+
+            int realID = id - 1;
+
+            int sx = (realID % columns) * tileSize;
+            int sy = (realID / columns) * tileSize;
+
+            int dx = (i % mapWidth) * tileSize;
+            int dy = (i / mapWidth) * tileSize;
+
+            painter.drawPixmap(dx, dy,
+                               tileset,
+                               sx, sy,
+                               tileSize, tileSize);
+        }
+    }
+    // =========================================================
+    // ⭐ 6️⃣ UI层（表情：永远最上层！）
+    // =========================================================
+    if(showEmotion && currentEmotion)
+    {
+        QPixmap emotionPix = currentEmotion->currentPixmap();
+
+        int playerW = 24;
+        int playerH = 24;
+
+        // ⭐更稳定的中心点（替换 +12）
+        int centerX = playerX + playerW / 2;
+
+        // ⭐头部位置（比 playerY 更合理）
+        int headY = playerY + 4;
+
+        int emoX = centerX - emotionPix.width() / 2;
+
+        // ⭐关键：让表情更贴近人物
+        int emoY = headY - emotionPix.height() - 2;
+
+        painter.drawPixmap(emoX, emoY, emotionPix);
+    }
+
+    // =========================================================
+    // 🌙 光照层（必须放在 paintEvent 最最后）
+    // =========================================================
+
+    float darkness = 0.0f;
+
+    if(timeOfDay <= 500)
+    {
+        darkness = 0.0f; // 白天
+    }
+    else if(timeOfDay <= 800)
+    {
+        darkness = (timeOfDay - 500) / 300.0f * 0.6f;
+    }
+    else
+    {
+        darkness = 0.85f; // 夜晚
+    }
+
+    QColor night(0, 0, 30, int(darkness * 220));
+
+    painter.setBrush(night);
+    painter.setPen(Qt::NoPen);
+
+    // ⚠️ 注意：你用了 scaleFactor=2
+    painter.drawRect(
+        0,
+        0,
+        width() / 2,
+        height() / 2
+        );
+}
+
+void MainWindow::onAnimationTimer()
+{
+    // 行走动画
+    if(isMoving)
+    {
+        currentFrame =
+            (currentFrame + 1) % 4;
+    }
+    else
+    {
+        currentFrame = 0;
+    }
+
+    // GIF动画刷新
+    if(currentEmotion)
+    {
+        currentEmotion
+            ->jumpToNextFrame();
+    }
+
+    update();
+}
+
+void MainWindow::tryOpenDoor()
+{
+    // =========================
+    // 室内 -> 室外
+    // =========================
+    if(insideHouse)
+    {
+        insideHouse = false;
+
+        playerX =
+            currentDoor.x() * tileSize;
+
+        playerY =
+            currentDoor.y() * tileSize + 32;
+
+        int index =
+            currentDoor.y() * mapWidth +
+            currentDoor.x();
+
+        int openedID =
+            layers[1][index];
+
+        layers[1][index] =
+            getClosedDoor(openedID);
+
+        update();
+
+        return;
+    }
+
+    // =========================
+    // 玩家tile
+    // =========================
+    int centerTX =
+        (playerX + 8) / tileSize;
+
+    int centerTY =
+        (playerY + 8) / tileSize;
+
+    QVector<int> &houseLayer =
+        layers[1];
+
+    // =========================
+    // 检测周围5x5范围
+    // =========================
+    for(int y=-2; y<=2; y++)
+    {
+        for(int x=-2; x<=2; x++)
+        {
+            int tx = centerTX + x;
+            int ty = centerTY + y;
+
+            if(tx < 0 ||
+                ty < 0 ||
+                tx >= mapWidth ||
+                ty >= mapHeight)
+            {
+                continue;
+            }
+
+            int index =
+                ty * mapWidth + tx;
+
+            if(index < 0 ||
+                index >= houseLayer.size())
+            {
+                continue;
+            }
+
+            int tileID =
+                houseLayer[index];
+
+            // 找到门
+            if(isClosedDoor(tileID))
+            {
+                // 开门
+                houseLayer[index] =
+                    getOpenedDoor(tileID);
+
+                currentDoor =
+                    QPoint(tx,ty);
+
+                // 进入房间
+                insideHouse = true;
+
+                playerX =
+                    indoorSpawn.x();
+
+                playerY =
+                    indoorSpawn.y();
+
+                update();
+
+                return;
+            }
+        }
+    }
+}
+
+void MainWindow::updatePlayer()
+{
+    updateSpeedByTerrain();
+
+    speed +=
+        (targetSpeed - speed)
+        * 0.10;
+
+    int targetX = playerX;
+    int targetY = playerY;
+
+    isMoving = false;
+
+    if(keyW)
+    {
+        targetY -= speed;
+        currentDir = 3;
+        isMoving = true;
+    }
+
+    if(keyS)
+    {
+        targetY += speed;
+        currentDir = 0;
+        isMoving = true;
+    }
+
+    if(keyA)
+    {
+        targetX -= speed;
+        currentDir = 1;
+        isMoving = true;
+    }
+
+    if(keyD)
+    {
+        targetX += speed;
+        currentDir = 2;
+        isMoving = true;
+    }
+
+    if(canMoveTo(targetX,
+                  playerY))
+    {
+        playerX = targetX;
+    }
+
+    if(canMoveTo(playerX,
+                  targetY))
+    {
+        playerY = targetY;
+    }
+
+    update();
+}
+
+void MainWindow::openDoor(int tx,
+                          int ty)
+{
+    Q_UNUSED(tx);
+    Q_UNUSED(ty);
+}
