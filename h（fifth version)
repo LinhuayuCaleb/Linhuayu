@@ -1,0 +1,222 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QWidget>
+#include <QVector>
+#include <QPixmap>
+#include <QTimer>
+#include <QPoint>
+#include <QRect>
+#include <QKeyEvent>
+#include <QMovie>
+#include <QRandomGenerator>
+#include <QDateTime>
+#include <QMap> // 用于记录每个格子的种植时间
+#include <QMediaPlayer>
+#include <QAudioOutput>
+
+struct Item
+{
+    int id;
+    int count;
+};
+
+class MainWindow : public QWidget
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+
+private slots:
+    void onAnimationTimer();
+
+private:
+
+    // =========================
+    // 地图
+    // =========================
+    QVector<QVector<int>> layers;
+
+    int mapWidth = 30;
+    int mapHeight = 20;
+    int tileSize = 16;
+
+    void drawTile(QPainter &painter, int id, int dx, int dy);
+
+    QMediaPlayer *bgmPlayer = nullptr;
+    QAudioOutput *audioOutput = nullptr;
+
+    void loadTMX();
+
+    // =========================
+    // 玩家
+    // =========================
+    int playerX = 100;
+    int playerY = 100;
+
+    float speed = 0;
+    float targetSpeed = 2.0;
+
+    int currentFrame = 0;
+    int currentDir = 0;
+
+    bool isMoving = false;
+
+    bool keyW = false;
+    bool keyA = false;
+    bool keyS = false;
+    bool keyD = false;
+
+    QPixmap playerSheet;
+    QPixmap tileset1;
+    QPixmap tileset2;
+    int columns1;
+    int columns2;
+
+    int tileset1_start = 1;
+    int tileset1_end = 500;
+
+    int tileset2_start = 501;
+    int tileset2_end = 1000;
+
+    const int spriteW = 48;
+    const int spriteH = 50;
+    const int renderSize = 20;
+
+    // =========================
+    // 定时器
+    // =========================
+    QTimer *moveTimer = nullptr;
+    QTimer *animTimer = nullptr;
+
+    // =========================
+    // 室内系统
+    // =========================
+    bool insideHouse = false;
+
+    QPoint indoorSpawn = QPoint(160,160);
+    QRect indoorBounds = QRect(40,40,280,180);
+    QPoint currentDoor;
+
+    // =========================
+    // 门系统
+    // =========================
+    bool isClosedDoor(int id);
+    bool isOpenedDoor(int id);
+    int getOpenedDoor(int closedID);
+    int getClosedDoor(int openID);
+
+    // 功能函数
+    bool canMoveTo(int nextX, int nextY);
+    void updatePlayer();
+    void updateSpeedByTerrain();
+    void tryOpenDoor();
+    void updateVolume();
+    void openDoor(int tx, int ty);
+    void updatePlantGrowth();
+    QMap<int, qint64> plantTimeMap;
+    // =========================
+    // 表情系统
+    // =========================
+    struct EmotionItem
+    {
+        QMovie* movie;
+        QString name;
+        bool dayOnly;
+        bool nightOnly;
+    };
+
+    QVector<EmotionItem> emotionItems;
+    QMovie* currentEmotion = nullptr;
+    QTimer* emotionTimer = nullptr;
+
+    bool showEmotion = false;
+    int timeOfDay = 0;
+    bool isNight = false;
+    bool isNearTile16();
+
+
+    int findFarmIndex();
+    // =========================
+    // 🌱 农田系统（最终修正版）
+    // =========================
+private:
+    // =========================
+    // 🌱 农田系统（精简整合版）
+    // =========================
+
+    // 1. 核心定时器：负责每秒刷新生长状态
+    QTimer *farmTimer = nullptr;
+
+    // 2. 种植数据：Key 是格子的索引 (y * mapWidth + x)，Value 是种植时的起始时间戳
+    // 使用 QMap 可以只记录有植物的格子，节省内存并方便遍历
+    // 3. 图层索引常量 (根据你的 TMX 文件顺序定义)
+    // 提示：TMX中 id="16" 的 "before" 层通常是 layers[4]
+    const int BEFORE_LAYER_INDEX = 4;  // 判定层
+    const int GROW_START_INDEX = 5;    // 第一阶段花 (TMX id="7") 的图层索引
+    const int GROW_END_INDEX = 13;     // 最终阶段花 (TMX id="15") 的图层索引
+    static const int FAIL_LAYER_INDEX  = 13;   // fail层索引（与GROW_END_INDEX相同）
+    static const int MATURE_STAGE_1    = 6;    // 图层14（阶段6）
+    static const int MATURE_STAGE_2    = 7;    // 图层15（阶段7）
+    static const int MAX_GROW_STAGE    = 8;    // 阶段8（枯萎）
+    // 4. 资源加载
+    QPixmap flowerSheet; // 在构造函数里用 flowerSheet.load("flower.png") 加载
+
+    const int ITEM_FLOWER = 1;
+    // =========================
+    // 功能函数声明
+    // =========================
+
+    // 寻找玩家当前脚下格子的索引，并检查 BEFORE_LAYER_INDEX 层是否有种植标记
+
+    // 定时器槽函数：计算时间差并切换 layers[5...13] 的内容
+
+    QVector<qint64> plantTime;
+    QVector<bool> flowerActive;
+
+    enum GameState
+    {
+        MENU,
+        SETTINGS,
+        PLAYING
+    };
+
+    GameState gameState = MENU;
+
+    QVector<Item> inventory;
+    QVector<int> mazeLayer;
+    // ===== 启动界面 =====
+    //主菜单按钮
+    QRect startButton;
+    QRect musicButton;
+    QRect backButton;//设置界面按钮
+    QPixmap menuBackground;
+    QRect bagButton;
+    QRect exitButton;
+    QRect volumeButton;
+    bool menuBgReady = false;
+    bool showInventory = false;
+    bool showExitMenu = false;
+    bool showVolumePanel = false;
+
+    int  bgmVolume=50;//音量滑条
+    // ===== 渲染函数 =====
+    QPixmap renderGameFrame();
+    QImage blurImage(const QImage &source, int radius = 6);
+
+
+    // =========================
+    // 工具函数
+    // =========================
+    int getFarmIndex(int x, int y);
+};
+
+#endif
