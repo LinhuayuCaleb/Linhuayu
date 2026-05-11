@@ -1,0 +1,1463 @@
+// mainwindow.cpp
+
+#include "mainwindow.h"
+
+#include <QPainter>
+#include <QFile>
+#include <QXmlStreamReader>
+#include <QDebug>
+#include <QCoreApplication>
+#include <QUrl>
+#include<QMouseEvent>
+MainWindow::MainWindow(QWidget *parent)
+    : QWidget(parent)
+{
+    loadTMX();
+    gameState = MENU;
+
+    // 屏幕居中按钮
+    startButton = QRect(width()/2 - 80, height()/2 - 60, 160, 50);
+    musicButton = QRect(width()/2 - 80, height()/2 + 10, 160, 50);
+
+    // 设置界面返回按钮
+    backButton = QRect(20, 20, 120, 40);
+    bagButton = QRect(10, 10, 50, 50);
+    exitButton = QRect(70, 10, 50, 50);
+    volumeButton = QRect(130, 10, 50, 50);
+
+    tileset1.load("tiles.png");
+    tileset2.load("tilemap.png");
+
+    columns1 = tileset1.width() / tileSize;
+    columns2 = tileset2.width() / tileSize;
+
+    // =========================
+    // 玩家贴图
+    // =========================
+    if(!playerSheet.load("Caleb_Walk.png"))
+    {
+        qDebug() << "Cannot find Caleb_Walk.png";
+    }
+
+    // ===== BGM =====
+
+    bgmPlayer = new QMediaPlayer(this);
+
+    audioOutput = new QAudioOutput(this);
+
+    bgmPlayer->setAudioOutput(audioOutput);
+
+    audioOutput->setVolume(bgmVolume/100.0);
+
+    QString path =
+        QCoreApplication::applicationDirPath()
+        + "/bgm.mp3";
+
+    bgmPlayer->setSource(
+        QUrl::fromLocalFile(path)
+        );
+
+    bgmPlayer->play();
+
+    // =========================
+    // 窗口
+    // =========================
+    double scaleFactor = 2.0;
+
+    setFixedSize(
+        mapWidth * tileSize * scaleFactor,
+        mapHeight * tileSize * scaleFactor
+        );
+
+    setFocusPolicy(Qt::StrongFocus);
+    plantTime.resize(mapWidth * mapHeight);
+    flowerActive.resize(mapWidth * mapHeight);
+    std::fill(flowerActive.begin(), flowerActive.end(), false);
+    // =========================
+    // 室内房间居中
+    // =========================
+    int roomW = 280;
+    int roomH = 180;
+
+    int logicalW =
+        mapWidth * tileSize;
+
+    int logicalH =
+        mapHeight * tileSize;
+
+    int roomX =
+        (logicalW - roomW) / 2;
+
+    int roomY =
+        (logicalH - roomH) / 2;
+
+    indoorBounds =
+        QRect(roomX,
+              roomY,
+              roomW,
+              roomH);
+
+    indoorSpawn =
+        QPoint(
+            indoorBounds.center().x(),
+            indoorBounds.center().y()
+            );
+
+    // =========================
+    // 动画
+    // =========================
+    animTimer = new QTimer(this);
+
+    connect(animTimer,
+            &QTimer::timeout,
+            this,
+            &MainWindow::onAnimationTimer);
+
+    animTimer->start(120);
+
+    QTimer* timeTimer = new QTimer(this);
+
+    connect(timeTimer, &QTimer::timeout, this, [=]()
+            {
+                timeOfDay += 1;
+
+                if(timeOfDay > 1000)
+                    timeOfDay = 0;
+
+                // 白天 / 夜晚判断
+                isNight = (timeOfDay > 600);
+
+                update();
+            });
+
+    timeTimer->start(50);
+
+
+    // =========================
+    // 移动
+    // =========================
+    moveTimer = new QTimer(this);
+
+    connect(moveTimer,
+            &QTimer::timeout,
+            this,
+            &MainWindow::updatePlayer);
+
+    moveTimer->start(16);
+    setFocus();
+    // =========================
+    // GIF表情加载
+    // =========================
+
+    // 普通表情（不受昼夜影响）
+    emotionItems.append({new QMovie("happy.gif"), "happy", false, false});
+    emotionItems.append({new QMovie("funny.gif"), "funny", false, false});
+    emotionItems.append({new QMovie("hug.gif"), "hug", false, false});
+    emotionItems.append({new QMovie("tired.gif"), "tired", false, false});
+    emotionItems.append({new QMovie("comfort.gif"), "comfort", false, false});
+    emotionItems.append({new QMovie("celebrate.gif"), "celebrate", false, false});
+
+    // 🌞 只有白天
+    emotionItems.append({new QMovie("goodmorning.gif"), "goodmorning", true, false});
+
+    // 🌙 只有夜晚
+    emotionItems.append({new QMovie("goodnight.gif"), "goodnight", false, true});
+
+    // =========================
+    // 表情随机刷新
+    // =========================
+
+
+    if(!emotionTimer)
+    {
+        emotionTimer = new QTimer(this);
+
+        connect(emotionTimer, &QTimer::timeout, this, [=]()
+                {
+                    QVector<EmotionItem> pool;
+
+                    for(const auto &e : emotionItems)
+                    {
+                        // 🌞 夜晚屏蔽 morning
+                        if(isNight && e.dayOnly)
+                            continue;
+
+                        // 🌙 白天屏蔽 night
+                        if(!isNight && e.nightOnly)
+                            continue;
+
+                        pool.append(e);
+                    }
+
+                    if(pool.isEmpty())
+                        return;
+
+                    int index =
+                        QRandomGenerator::global()->bounded(pool.size());
+
+                    currentEmotion = pool[index].movie;
+
+                    if(currentEmotion)
+                    {
+                        currentEmotion->start();
+                    }
+
+                    showEmotion = true;
+
+                    update();
+                });
+
+        emotionTimer->start(3000);
+    }
+    // =========================
+    // 🌸 花生长系统
+    // =========================
+    // =========================
+    // 🌱 农田系统初始化（关键修复）
+    // =========================
+    int total = mapWidth * mapHeight;
+
+    farmTimer = new QTimer(this);
+    connect(farmTimer, &QTimer::timeout, this, [this]()
+            {
+                // 安全检查
+                if (GROW_START_INDEX >= layers.size() || GROW_END_INDEX >= layers.size())
+                    return;
+
+                const qint64 now = QDateTime::currentMSecsSinceEpoch();
+                const qint64 stageDurationMs = 15 * 1000;  // 每个阶段15秒（需求说15秒）
+                const qint64 failShowMs = 10 * 1000;       // 枯萎持续10秒
+
+                for (int i = 0; i < plantTime.size(); ++i)
+                {
+                    if (plantTime[i] == 0)
+                        continue;
+
+                    qint64 elapsed = now - plantTime[i];
+                    int stage = static_cast<int>(elapsed / stageDurationMs);
+
+                    if (stage > MAX_GROW_STAGE)
+                        stage = MAX_GROW_STAGE;
+
+                    // 清空所有生长层（包括fail层）
+                    for (int l = GROW_START_INDEX; l <= GROW_END_INDEX; ++l)
+                        layers[l][i] = 0;
+
+                    if (stage == MAX_GROW_STAGE)  // 枯萎阶段
+                    {
+                        qint64 failEndTime = MAX_GROW_STAGE * stageDurationMs + failShowMs;
+                        if (elapsed >= failEndTime)
+                        {
+                            // 枯萎结束，完全清除，恢复可种植状态
+                            plantTime[i] = 0;
+                            // layers 已经全部清零，无需额外操作
+                            continue;
+                        }
+                        else
+                        {
+                            // 显示枯萎花
+                            if (FAIL_LAYER_INDEX < layers.size())
+                                layers[FAIL_LAYER_INDEX][i] = 141;
+                        }
+                    }
+                    else  // 正常生长阶段 0..7
+                    {
+                        int targetLayer = GROW_START_INDEX + stage;
+                        if (targetLayer <= GROW_END_INDEX)
+                            layers[targetLayer][i] = 133 + stage;
+                    }
+                }
+
+                update();
+            });
+    farmTimer->start(1000);   // 每秒检查一次即可
+}
+
+void MainWindow::loadTMX()
+{
+    QFile file("map.tmx");
+
+    if(!file.open(QIODevice::ReadOnly))
+        return;
+
+    QXmlStreamReader xml(&file);
+
+    while(!xml.atEnd())
+    {
+        xml.readNext();
+
+        if(xml.isStartElement() &&
+            xml.name() == "data")
+        {
+            QString data =
+                xml.readElementText();
+
+            QStringList list =
+                data.split(",");
+
+            QVector<int> layer;
+
+            for(QString s : list)
+            {
+                layer.append(
+                    s.trimmed().toInt()
+                    );
+            }
+
+            layers.append(layer);
+        }
+    }
+
+    file.close();
+}
+
+bool MainWindow::isClosedDoor(int id)
+{
+    return id == 85 ||
+           id == 89;
+}
+
+bool MainWindow::isOpenedDoor(int id)
+{
+    return id == 74 ||
+           id == 78;
+}
+
+int MainWindow::getOpenedDoor(int closedID)
+{
+    if(closedID == 85)
+        return 74;
+
+    if(closedID == 89)
+        return 78;
+
+    return closedID;
+}
+
+int MainWindow::getClosedDoor(int openID)
+{
+    if(openID == 74)
+        return 85;
+
+    if(openID == 78)
+        return 89;
+
+    return openID;
+}
+
+bool MainWindow::canMoveTo(int nextX,
+                           int nextY)
+{
+    // =========================
+    // 室内碰撞
+    // =========================
+    if(insideHouse)
+    {
+        QRect playerRect(
+            nextX,
+            nextY,
+            16,
+            16
+            );
+
+        return indoorBounds.contains(
+            playerRect
+            );
+    }
+    if(insideHouse)
+    {
+        playerX = tileSize * 1;
+        playerY = tileSize * 1;
+        int mazeW = 10;
+
+        QRect playerRect(nextX, nextY, 16, 16);
+
+        int cx = nextX / tileSize;
+        int cy = nextY / tileSize;
+
+        int index = cy * mazeW + cx;
+
+        if(index >= 0 && index < mazeLayer.size())
+        {
+            if(mazeLayer[index] == 1)
+                return false; // 墙不能走
+        }
+
+        return true;
+    }
+
+    int size = 16;
+
+    // =========================
+    // 地图边界
+    // =========================
+    if(nextX < 0 ||
+        nextY < 0 ||
+        nextX + size >
+            mapWidth * tileSize ||
+        nextY + size >
+            mapHeight * tileSize)
+    {
+        return false;
+    }
+
+    QVector<QPoint> points =
+        {
+            QPoint(nextX,nextY),
+            QPoint(nextX+15,nextY),
+            QPoint(nextX,nextY+15),
+            QPoint(nextX+15,nextY+15)
+        };
+
+    for(auto &p : points)
+    {
+        int tx = p.x() / tileSize;
+        int ty = p.y() / tileSize;
+
+        int index =
+            ty * mapWidth + tx;
+
+        // =========================
+        // 房屋层碰撞
+        // =========================
+        if(1 < layers.size())
+        {
+            const auto &houseLayer =
+                layers[1];
+
+            if(index >= 0 &&
+                index < houseLayer.size())
+            {
+                int tileID =
+                    houseLayer[index];
+
+                // 关闭门阻挡
+                if(isClosedDoor(tileID))
+                {
+                    return false;
+                }
+
+                // 开门允许通过
+                if(isOpenedDoor(tileID))
+                {
+                    continue;
+                }
+
+                // 房顶阻挡
+                if(tileID >= 49)
+                {
+                    return false;
+                }
+            }
+        }
+
+        // =========================
+        // 树木阻挡
+        // =========================
+        if(3 < layers.size())
+        {
+            const auto &treeLayer =
+                layers[3];
+
+            if(index >= 0 &&
+                index < treeLayer.size())
+            {
+                if(treeLayer[index] != 0)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+void MainWindow::updateSpeedByTerrain()
+{
+    if(insideHouse)
+    {
+        targetSpeed = 2.0;
+        return;
+    }
+
+    int tx =
+        (playerX + 8) / tileSize;
+
+    int ty =
+        (playerY + 8) / tileSize;
+
+    int index =
+        ty * mapWidth + tx;
+
+    targetSpeed = 2.0;
+
+    // 草地减速
+    if(0 < layers.size())
+    {
+        const auto &grass =
+            layers[0];
+
+        if(index < grass.size() &&
+            grass[index] == 1)
+        {
+            targetSpeed = 1.5;
+        }
+    }
+
+    // 马路加速
+    if(2 < layers.size())
+    {
+        const auto &road =
+            layers[2];
+
+        if(index < road.size() &&
+            road[index] != 0)
+        {
+            targetSpeed = 2.8;
+        }
+    }
+}
+
+void MainWindow::mousePressEvent(QMouseEvent *event)
+{
+    if(volumeButton.contains(event->pos()))
+    {
+        showVolumePanel = !showVolumePanel;
+        update();
+        return;
+    }
+    // 优先处理退出菜单
+    if(showExitMenu)
+    {
+        QRect backBtn(width()/2 - 80, height()/2 - 40, 160, 40);
+        QRect quitBtn(width()/2 - 80, height()/2 + 20, 160, 40);
+
+        if(backBtn.contains(event->pos()))
+        {
+            showExitMenu = false;
+            update();
+            return;
+        }
+
+        if(quitBtn.contains(event->pos()))
+        {
+            qApp->quit();
+            return;
+        }
+    }
+        // MENU
+        if(gameState == MENU)
+        {
+            if(startButton.contains(event->pos()))
+            {
+                gameState = PLAYING;
+                update();
+            }
+
+            if(musicButton.contains(event->pos()))
+            {
+                gameState = SETTINGS;
+                update();
+            }
+        }
+
+        // SETTINGS
+        else if(gameState == SETTINGS)
+        {
+            if(backButton.contains(event->pos()))
+            {
+                gameState = MENU;
+                update();
+            }
+
+            // 调整音量
+            int x = event->pos().x();
+            int center = width()/2;
+
+            if(x > center - 100 && x < center + 100)
+            {
+                bgmVolume = ((x - (center - 100)) * 100) / 200;
+
+                audioOutput->setVolume(bgmVolume / 100.0);
+            }
+        }
+        if(gameState == PLAYING)
+        {
+            if(bagButton.contains(event->pos()))
+            {
+                showInventory = !showInventory;
+                showExitMenu = false;
+                update();
+                return;
+            }
+
+            if(exitButton.contains(event->pos()))
+            {
+                showExitMenu = true;
+                showInventory = false;
+                update();
+                return;
+            }
+            if(volumeButton.contains(event->pos()))
+            {
+                showVolumePanel = !showVolumePanel;
+                showInventory = false;
+                showExitMenu = false;
+                update();
+                return;
+            }
+            if(showVolumePanel)
+            {
+                QRect minusBtn(width()/2 - 100, height()/2 - 20, 60, 40);
+                QRect plusBtn(width()/2 + 40, height()/2 - 20, 60, 40);
+
+                if(minusBtn.contains(event->pos()))
+                {
+                    bgmVolume -= 5;
+                    if(bgmVolume < 0) bgmVolume = 0;
+
+                    updateVolume();
+                    update();
+                    return;
+                }
+
+                if(plusBtn.contains(event->pos()))
+                {
+                    bgmVolume += 5;
+                    if(bgmVolume > 100) bgmVolume = 100;
+
+                    updateVolume();
+                    update();
+                    return;
+                }
+            }
+        }
+        setFocus();
+    }
+
+void MainWindow::resizeEvent(QResizeEvent *)
+{
+    startButton = QRect(width()/2 - 80, height()/2 - 60, 160, 50);
+    musicButton = QRect(width()/2 - 80, height()/2 + 10, 160, 50);
+    volumeButton = QRect(130, 10, 50, 50);
+    setFocus();
+}
+
+void MainWindow::updateVolume()
+{
+    bgmVolume = qBound(0, bgmVolume, 100);
+
+    if(audioOutput)
+        audioOutput->setVolume(bgmVolume / 100.0);
+
+    update();
+}
+
+void MainWindow::keyPressEvent(QKeyEvent *event)
+{
+    if(gameState != PLAYING)
+    {
+        if(event->key() == Qt::Key_Return)
+        {
+            gameState = PLAYING;
+            update();
+        }
+        return;
+    }
+    qDebug() << "KEY =" << event->key();
+    if(event->isAutoRepeat())
+        return;
+
+    if(event->key() == Qt::Key_W)
+        keyW = true;
+
+    if(event->key() == Qt::Key_S)
+        keyS = true;
+
+    if(event->key() == Qt::Key_A)
+        keyA = true;
+
+    if(event->key() == Qt::Key_D)
+        keyD = true;
+
+    if(event->key() == Qt::Key_E)
+    {
+        tryOpenDoor();
+    }
+    if(event->key() == Qt::Key_N)
+    {
+        isNight = !isNight;
+
+        // 同步时间（避免冲突）
+        timeOfDay = isNight ? 800 : 200;
+
+        update();
+    }
+    if (event->key() == Qt::Key_G)
+    {
+        if (layers.size() <= BEFORE_LAYER_INDEX) return;
+
+        int tx = (playerX + 8) / tileSize;
+        int ty = (playerY + 8) / tileSize;
+        int index = ty * mapWidth + tx;
+
+        if (index < 0 || index >= layers[BEFORE_LAYER_INDEX].size())
+            return;
+
+        // 必须是可种植地
+        if (layers[BEFORE_LAYER_INDEX][index] == 0)
+            return;
+
+        // 清理旧花
+        for (int l = GROW_START_INDEX; l <= GROW_END_INDEX; ++l)
+            if (l < layers.size())
+                layers[l][index] = 0;
+
+        // 种花（阶段0）
+        layers[GROW_START_INDEX][index] = 133;
+        flowerActive[index] = true;
+        for (int l = GROW_START_INDEX; l <= GROW_END_INDEX; ++l)
+            if (l < layers.size())
+                layers[l][index] = 0;   // 强制清空旧花
+
+        // 记录时间
+        plantTime[index] = QDateTime::currentMSecsSinceEpoch();
+
+        update();
+    }
+    if (event->key() == Qt::Key_H)
+    {
+        int cx = (playerX + 8) / tileSize;
+        int cy = (playerY + 8) / tileSize;
+
+        for (int dy = -1; dy <= 1; ++dy)
+        {
+            for (int dx = -1; dx <= 1; ++dx)
+            {
+                int nx = cx + dx;
+                int ny = cy + dy;
+
+                if (nx < 0 || ny < 0 || nx >= mapWidth || ny >= mapHeight)
+                    continue;
+
+                int index = ny * mapWidth + nx;
+
+                if (index < 0 || index >= plantTime.size())
+                    continue;
+
+                if (plantTime[index] == 0)
+                    continue;
+
+                qint64 elapsed =
+                    QDateTime::currentMSecsSinceEpoch() - plantTime[index];
+
+                int stage = elapsed / (15 * 1000);
+
+                // 成熟才能收
+                if (stage >= 6)
+                {
+                    // =========================
+                    // 🎒 加入背包
+                    // =========================
+                    bool found = false;
+
+                    for(auto &it : inventory)
+                    {
+                        if(it.id == ITEM_FLOWER)
+                        {
+                            it.count++;
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if(!found)
+                    {
+                        inventory.push_back({ITEM_FLOWER, 1});
+                    }
+
+                    // =========================
+                    // 🌿 清除地图花
+                    // =========================
+                    for (int l = GROW_START_INDEX; l <= GROW_END_INDEX; ++l)
+                    {
+                        flowerActive[index] = false;
+
+                        if (l < layers.size())
+                            layers[l][index] = 0;
+                    }
+
+                    plantTime[index] = 0;
+
+                    update();
+                    return;
+                }
+            }
+        }
+    }
+    if(event->key() == Qt::Key_B)
+    {
+        showInventory = !showInventory;
+        update();
+        return;
+    }
+}
+
+void MainWindow::keyReleaseEvent(QKeyEvent *event)
+{
+    if(event->isAutoRepeat())
+        return;
+
+    if(event->key() == Qt::Key_W)
+        keyW = false;
+
+    if(event->key() == Qt::Key_S)
+        keyS = false;
+
+    if(event->key() == Qt::Key_A)
+        keyA = false;
+
+    if(event->key() == Qt::Key_D)
+        keyD = false;
+}
+
+void MainWindow::drawTile(QPainter &painter,
+                          int id,
+                          int dx, int dy)
+{
+    if(id <= 0) return;
+
+    // =========================
+    // tiles.png（1 ~ 132）
+    // =========================
+    if(id >= 1 && id <= 132)
+    {
+        int realID = id - 1;
+
+        int sx = (realID % columns1) * tileSize;
+        int sy = (realID / columns1) * tileSize;
+
+        painter.drawPixmap(dx, dy,
+                           tileset1,
+                           sx, sy,
+                           tileSize, tileSize);
+        return;
+    }
+
+    // =========================
+    // tilemap.png（142 ~ 338）
+    // =========================
+    if(id >= 142 && id <= 338)
+    {
+        int realID = id - 142;
+
+        int sx = (realID % columns2) * tileSize;
+        int sy = (realID / columns2) * tileSize;
+
+        painter.drawPixmap(dx, dy,
+                           tileset2,
+                           sx, sy,
+                           tileSize, tileSize);
+        return;
+    }
+
+    // 133~141：空/特殊层（不画）
+}
+
+void MainWindow::paintEvent(QPaintEvent *)
+{
+    // =========================
+    // MENU
+    // =========================
+    if(gameState == MENU)
+    {
+        QPainter p(this);
+
+        if(!menuBgReady)
+        {
+            QPixmap frame = renderGameFrame();
+            QImage blurred = blurImage(frame.toImage(), 6);
+
+            menuBackground = QPixmap::fromImage(blurred);
+            menuBgReady = true;
+        }
+
+        p.drawPixmap(0, 0, width(), height(), menuBackground);
+        p.fillRect(rect(), QColor(0, 0, 0, 120));
+
+        p.setPen(Qt::white);
+        QFont font("Arial", 18);
+        font.setBold(true);
+        p.setFont(font);
+
+        QRect r = rect();
+        r.moveTop(r.top() + 170);
+        p.drawText(r, Qt::AlignHCenter | Qt::AlignTop, "Caleb and Apple");
+
+        p.setBrush(QColor(80,200,120));
+        p.setPen(Qt::black);
+        p.drawRect(startButton);
+        p.drawText(startButton, Qt::AlignCenter, "START");
+
+        p.setBrush(QColor(80,120,200));
+        p.drawRect(musicButton);
+        p.drawText(musicButton, Qt::AlignCenter, "MUSIC");
+
+        return;
+    }
+
+    // =========================
+    // SETTINGS
+    // =========================
+    if(gameState == SETTINGS)
+    {
+        QPainter p(this);
+        p.fillRect(rect(), QColor(30,30,30));
+
+        p.setPen(Qt::white);
+        p.setBrush(Qt::gray);
+        p.drawRect(backButton);
+        p.drawText(backButton, Qt::AlignCenter, "BACK");
+
+        QRect bar(width()/2 - 100, height()/2, 200, 20);
+
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::darkGray);
+        p.drawRect(bar);
+
+        int volume = qBound(0, bgmVolume, 100);
+
+        QRect valueBar = bar;
+        valueBar.setWidth(bar.width() * volume / 100.0);
+
+        QLinearGradient grad(valueBar.topLeft(), valueBar.topRight());
+        grad.setColorAt(0.0, QColor(255,140,0));
+        grad.setColorAt(1.0, QColor(0,170,255));
+
+        p.setBrush(grad);
+
+        if(valueBar.width() > 0)
+            p.drawRect(valueBar);
+
+        p.setPen(Qt::white);
+        p.drawText(bar.x(), bar.y() - 10, "BGM Volume");
+        p.drawText(bar, Qt::AlignCenter, QString("%1%").arg(volume));
+
+        return;
+    }
+
+    // =========================
+    // GAME RENDER
+    // =========================
+    QPainter painter(this);
+    painter.scale(2.0, 2.0);
+
+    // =========================
+    // 地图绘制（室外 / 室内统一）
+    // =========================
+    if(!insideHouse)
+    {
+        for(int l = 0; l < layers.size(); l++)
+        {
+            if(l == 1) continue;
+
+            const auto &layer = layers[l];
+
+            for(int i = 0; i < layer.size(); i++)
+            {
+                int id = layer[i];
+                if(id == 0) continue;
+
+                int dx = (i % mapWidth) * tileSize;
+                int dy = (i / mapWidth) * tileSize;
+
+                drawTile(painter, id, dx, dy);
+            }
+        }
+    }
+    else
+    {
+        if(layers.size() > 1)
+        {
+            const auto &houseLayer = layers[1];
+
+            for(int i = 0; i < houseLayer.size(); i++)
+            {
+                int id = houseLayer[i];
+                if(id == 0) continue;
+
+                int dx = (i % mapWidth) * tileSize;
+                int dy = (i / mapWidth) * tileSize;
+
+                drawTile(painter, id, dx, dy);
+            }
+        }
+    }
+
+    // =========================
+    // 花系统
+    // =========================
+    QPixmap flowerSheet("flower.png");
+
+    if(!flowerSheet.isNull())
+    {
+        for(int l = GROW_START_INDEX; l <= GROW_END_INDEX; ++l)
+        {
+            if(l >= layers.size()) continue;
+
+            const auto &layer = layers[l];
+
+            for(int i = 0; i < layer.size(); ++i)
+            {
+                int id = layer[i];
+                if(id == 0) continue;
+
+                if(i >= flowerActive.size() || !flowerActive[i])
+                    continue;
+
+                int local = id - 133;
+                if(local < 0 || local > 8) continue;
+
+                int tx = i % mapWidth;
+                int ty = i / mapWidth;
+
+                int baseX = tx * tileSize;
+                int baseY = ty * tileSize;
+
+                painter.drawPixmap(
+                    baseX + (tileSize - 32) / 2,
+                    baseY + (tileSize - 32) / 2,
+                    32, 32,
+                    flowerSheet,
+                    local * 32, 0, 32, 32
+                    );
+            }
+        }
+    }
+
+    // =========================
+    // 阴影
+    // =========================
+    painter.setBrush(QColor(0,0,0,80));
+    painter.setPen(Qt::NoPen);
+    painter.drawEllipse(playerX - 4, playerY + 10, 16, 6);
+
+    // =========================
+    // 玩家
+    // =========================
+    if(!playerSheet.isNull())
+    {
+        int srcW = playerSheet.width() / 4;
+        int srcH = playerSheet.height() / 4;
+
+        int row = 0;
+        bool mirror = false;
+
+        if(currentDir == 0) row = 0;
+        else if(currentDir == 3) row = 2;
+        else if(currentDir == 2) { row = 1; mirror = true; }
+        else if(currentDir == 1) row = 1;
+
+        QRect sourceRect(currentFrame * srcW, row * srcH, srcW, srcH);
+        QRect targetRect(playerX - 4, playerY - 4, 24, 24);
+
+        if(mirror)
+        {
+            QImage img = playerSheet.copy(sourceRect).toImage();
+            painter.drawImage(targetRect, img.mirrored(true,false));
+        }
+        else
+        {
+            painter.drawPixmap(targetRect, playerSheet, sourceRect);
+        }
+    }
+
+    // =========================
+    // 夜晚遮罩
+    // =========================
+    float darkness = 0.0f;
+
+    if(timeOfDay > 500 && timeOfDay <= 800)
+        darkness = (timeOfDay - 500) / 300.0f * 0.6f;
+    else if(timeOfDay > 800)
+        darkness = 0.85f;
+
+    painter.setBrush(QColor(0,0,30, int(darkness * 220)));
+    painter.setPen(Qt::NoPen);
+    painter.drawRect(0, 0, width()/2, height()/2);
+
+    // =========================
+    // 表情
+    // =========================
+    if(showEmotion && currentEmotion)
+    {
+        QPixmap emotionPix =
+            currentEmotion->currentPixmap().scaled(64, 64, Qt::KeepAspectRatio);
+
+        painter.drawPixmap(
+            playerX + 12 - emotionPix.width()/2,
+            playerY + 4 - emotionPix.height(),
+            emotionPix
+            );
+    }
+
+    // =========================
+    // UI按钮
+    // =========================
+    painter.setBrush(Qt::darkGray);
+    painter.setPen(Qt::white);
+
+    painter.drawRect(bagButton);
+    painter.drawRect(exitButton);
+    painter.drawRect(volumeButton);
+
+    QString icon;
+    if(bgmVolume == 0) icon = "🔇";
+    else if(bgmVolume < 50) icon = "🔉";
+    else icon = "🔊";
+
+    painter.drawText(volumeButton, Qt::AlignCenter, icon);
+    painter.drawText(bagButton, Qt::AlignCenter, "👜");
+    painter.drawText(exitButton, Qt::AlignCenter, "⚙");
+
+    // =========================
+    // 音量面板
+    // =========================
+    if(showVolumePanel)
+    {
+        QRect panel(width()/2 - 120, height()/2 - 60, 240, 120);
+
+        painter.setBrush(QColor(0,0,0,180));
+        painter.setPen(Qt::white);
+        painter.drawRect(panel);
+
+        QRect minusBtn(panel.x() + 20, panel.y() + 40, 60, 40);
+        QRect plusBtn(panel.x() + 160, panel.y() + 40, 60, 40);
+
+        painter.drawRect(minusBtn);
+        painter.drawRect(plusBtn);
+
+        painter.drawText(minusBtn, Qt::AlignCenter, "-");
+        painter.drawText(plusBtn, Qt::AlignCenter, "+");
+
+        painter.drawText(panel.x()+70, panel.y()+20,
+                         QString("Volume: %1").arg(bgmVolume));
+    }
+}
+
+void MainWindow::onAnimationTimer()
+{
+    // 行走动画
+    if(isMoving)
+    {
+        currentFrame =
+            (currentFrame + 1) % 4;
+    }
+    else
+    {
+        currentFrame = 0;
+    }
+
+    // GIF动画刷新
+    if(currentEmotion)
+    {
+        currentEmotion
+            ->jumpToNextFrame();
+    }
+
+    update();
+}
+
+void MainWindow::tryOpenDoor()
+{
+    // =========================
+    // 室内 -> 室外
+    // =========================
+    if(insideHouse)
+    {
+        insideHouse = false;
+
+        playerX =
+            currentDoor.x() * tileSize;
+
+        playerY =
+            currentDoor.y() * tileSize + 32;
+
+        int index =
+            currentDoor.y() * mapWidth +
+            currentDoor.x();
+
+        int openedID =
+            layers[1][index];
+
+        layers[1][index] =
+            getClosedDoor(openedID);
+
+        update();
+
+        return;
+    }
+
+    // =========================
+    // 玩家tile
+    // =========================
+    int centerTX =
+        (playerX + 8) / tileSize;
+
+    int centerTY =
+        (playerY + 8) / tileSize;
+
+    QVector<int> &houseLayer =
+        layers[1];
+
+    // =========================
+    // 检测周围5x5范围
+    // =========================
+    for(int y=-2; y<=2; y++)
+    {
+        for(int x=-2; x<=2; x++)
+        {
+            int tx = centerTX + x;
+            int ty = centerTY + y;
+
+            if(tx < 0 ||
+                ty < 0 ||
+                tx >= mapWidth ||
+                ty >= mapHeight)
+            {
+                continue;
+            }
+
+            int index =
+                ty * mapWidth + tx;
+
+            if(index < 0 ||
+                index >= houseLayer.size())
+            {
+                continue;
+            }
+
+            int tileID =
+                houseLayer[index];
+
+            // 找到门
+            if(isClosedDoor(tileID))
+            {
+                // 开门
+                houseLayer[index] =
+                    getOpenedDoor(tileID);
+
+                currentDoor =
+                    QPoint(tx,ty);
+
+                // 进入房间
+                insideHouse = true;
+
+                playerX =
+                    indoorSpawn.x();
+
+                playerY =
+                    indoorSpawn.y();
+
+                update();
+
+                return;
+            }
+        }
+    }
+}
+
+void MainWindow::updatePlayer()
+{
+    if(gameState != PLAYING) return;
+    updateSpeedByTerrain();
+
+    speed +=
+        (targetSpeed - speed)
+        * 0.10;
+
+    int targetX = playerX;
+    int targetY = playerY;
+
+    isMoving = false;
+
+    if(keyW)
+    {
+        targetY -= speed;
+        currentDir = 3;
+        isMoving = true;
+    }
+
+    if(keyS)
+    {
+        targetY += speed;
+        currentDir = 0;
+        isMoving = true;
+    }
+
+    if(keyA)
+    {
+        targetX -= speed;
+        currentDir = 1;
+        isMoving = true;
+    }
+
+    if(keyD)
+    {
+        targetX += speed;
+        currentDir = 2;
+        isMoving = true;
+    }
+
+    if(canMoveTo(targetX,
+                  playerY))
+    {
+        playerX = targetX;
+    }
+
+    if(canMoveTo(playerX,
+                  targetY))
+    {
+        playerY = targetY;
+    }
+
+    update();
+}
+
+void MainWindow::openDoor(int tx,
+                          int ty)
+{
+    Q_UNUSED(tx);
+    Q_UNUSED(ty);
+}
+bool MainWindow::isNearTile16()
+{
+    if(layers.size() <= 16)
+        return false;
+
+    const auto &layer16 = layers[16];
+
+    int tx = (playerX + 8) / tileSize;
+    int ty = (playerY + 8) / tileSize;
+
+    // 检测周围3x3
+    for(int y = -1; y <= 1; y++)
+    {
+        for(int x = -1; x <= 1; x++)
+        {
+            int nx = tx + x;
+            int ny = ty + y;
+
+            if(nx < 0 || ny < 0 ||
+                nx >= mapWidth ||
+                ny >= mapHeight)
+            {
+                continue;
+            }
+
+            int index = ny * mapWidth + nx;
+
+            if(index < 0 || index >= layer16.size())
+                continue;
+
+            // ⭐ 只要不是0
+            if(layer16[index] != 0)
+            {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+int MainWindow::findFarmIndex() {
+    // 检查图层索引是否存在，防止数组越界越级报错
+    if (layers.size() <= 4) return -1;
+
+    // 使用你类中定义的 playerX 和 playerY
+    int playerGridX = (playerX + 8) / tileSize; // +8 是为了取角色中心点
+    int playerGridY = (playerY + 8) / tileSize;
+
+    if (playerGridX < 0 || playerGridX >= mapWidth || playerGridY < 0 || playerGridY >= mapHeight)
+        return -1;
+
+    int index = playerGridY * mapWidth + playerGridX;
+
+    // 检查第 16 层（代码索引 4）是否有瓦片
+    if (layers[4][index] != 0) {
+        return index;
+    }
+    return -1;
+}
+
+QPixmap MainWindow::renderGameFrame()
+{
+    QPixmap img(size());
+    img.fill(Qt::black);
+
+    QPainter p(&img);
+
+    double scaleFactor = 2.0;
+    p.scale(scaleFactor, scaleFactor);
+
+    QPixmap tileset("tiles.png");
+    int columns = tileset.width() / tileSize;
+
+    if(!insideHouse)
+    {
+        for(int l = 0; l < layers.size(); l++)
+        {
+            if(l == 1) continue;
+
+            const auto &layer = layers[l];
+
+            for(int i = 0; i < layer.size(); i++)
+            {
+                int id = layer[i];
+                if(id == 0) continue;
+
+                int dx = (i % mapWidth) * tileSize;
+                int dy = (i / mapWidth) * tileSize;
+
+                drawTile(p, id, dx, dy);   // ⭐统一入口
+            }
+        }
+    }
+
+    return img;
+}
+
+QImage MainWindow::blurImage(const QImage &source, int radius)
+{
+    if(source.isNull()) return source;
+
+    QImage result = source;
+
+    for(int y = radius; y < source.height() - radius; y++)
+    {
+        for(int x = radius; x < source.width() - radius; x++)
+        {
+            int r = 0, g = 0, b = 0, count = 0;
+
+            for(int ky = -radius; ky <= radius; ky++)
+            {
+                for(int kx = -radius; kx <= radius; kx++)
+                {
+                    QColor c(source.pixel(x + kx, y + ky));
+                    r += c.red();
+                    g += c.green();
+                    b += c.blue();
+                    count++;
+                }
+            }
+
+            result.setPixelColor(
+                x, y,
+                QColor(r/count, g/count, b/count)
+                );
+        }
+    }
+
+    return result;
+}
