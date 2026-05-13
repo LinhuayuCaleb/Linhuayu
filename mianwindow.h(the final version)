@@ -1,0 +1,226 @@
+#ifndef MAINWINDOW_H
+#define MAINWINDOW_H
+
+#include <QWidget>
+#include <QVector>
+#include <QPixmap>
+#include <QTimer>
+#include <QPoint>
+#include <QRect>
+#include <QKeyEvent>
+#include <QMouseEvent>
+#include <QResizeEvent>
+#include <QMovie>
+#include <QRandomGenerator>
+#include <QDateTime>
+#include <QMap>
+#include <QMediaPlayer>
+#include <QAudioOutput>
+
+struct Item
+{
+    int id;
+    int count;
+};
+
+class MainWindow : public QWidget
+{
+    Q_OBJECT
+
+public:
+    MainWindow(QWidget *parent = nullptr);
+    ~MainWindow();   // ⭐ 新增析构函数声明
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+    void keyReleaseEvent(QKeyEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+
+private slots:
+    void onAnimationTimer();
+
+private:
+
+    // =========================================================
+    // 地图系统（统一 tileset）
+    // =========================================================
+    QVector<QVector<int>> layers;
+
+    int mapWidth = 30;
+    int mapHeight = 20;
+    int tileSize = 16;
+
+    QPixmap tileset;
+    int columns = 0;
+
+    void drawTile(QPainter &painter, int id, int dx, int dy);
+    void loadTMX();
+
+    // =========================================================
+    // 玩家系统
+    // =========================================================
+    int playerX = 100;
+    int playerY = 100;
+
+    float speed = 0;
+    float targetSpeed = 2.0;
+
+    int currentFrame = 0;
+    int currentDir = 0;
+
+    bool isMoving = false;
+
+    bool keyW = false;
+    bool keyA = false;
+    bool keyS = false;
+    bool keyD = false;
+
+    QPixmap playerSheet;
+
+    const int spriteW = 48;
+    const int spriteH = 50;
+
+    // =========================================================
+    // 定时器
+    // =========================================================
+    QTimer *moveTimer = nullptr;
+    QTimer *animTimer = nullptr;
+
+    // =========================================================
+    // 室内系统
+    // =========================================================
+    bool insideHouse = false;
+
+    QPoint indoorSpawn = QPoint(160,160);
+    QRect indoorBounds = QRect(40,40,280,180);
+    QPoint currentDoor;
+
+    // =========================================================
+    // 门系统
+    // =========================================================
+    bool isClosedDoor(int id);
+    bool isOpenedDoor(int id);
+    int getOpenedDoor(int closedID);
+    int getClosedDoor(int openID);
+
+    // =========================================================
+    // 游戏逻辑
+    // =========================================================
+    bool canMoveTo(int nextX, int nextY);
+    void updatePlayer();
+    void updateSpeedByTerrain();
+    void tryOpenDoor();
+    void updateVolume();
+    bool draggingVolume = false;
+    QRect volumeBarRect;
+
+    // =========================================================
+    // 🌸 表情系统
+    // =========================================================
+    struct EmotionItem
+    {
+        QMovie* movie;
+        QString name;
+        bool dayOnly;
+        bool nightOnly;
+    };
+
+    QVector<EmotionItem> emotionItems;
+    QMovie* currentEmotion = nullptr;
+    QTimer* emotionTimer = nullptr;
+
+    bool showEmotion = false;
+    int timeOfDay = 0;
+    bool isNight = false;
+
+    bool isNearTile16();
+
+    // =========================================================
+    // 农田系统
+    // =========================================================
+    QTimer *farmTimer = nullptr;
+
+    const int BEFORE_LAYER_INDEX = 4;
+    const int GROW_START_INDEX = 5;
+    const int GROW_END_INDEX = 13;
+    const int FAIL_LAYER_INDEX = 13;
+    const int MAX_GROW_STAGE = 8;
+
+    QPixmap flowerSheet;
+
+    const int ITEM_FLOWER = 1;
+
+    QVector<qint64> plantTime;
+    QVector<bool> flowerActive;
+
+    int findFarmIndex();
+
+    // =========================================================
+    // 游戏状态 & UI
+    // =========================================================
+    enum GameState
+    {
+        MENU,
+        SETTINGS,
+        PLAYING
+    };
+
+    GameState gameState = MENU;
+
+    enum UIPage
+    {
+        NONE,
+        INVENTORY_UI,
+        EXIT_UI,
+        VOLUME_UI
+    };
+    UIPage currentUI = NONE;
+
+    QVector<Item> inventory;
+    QVector<int> mazeLayer;
+
+    bool showInventoryUI = false;
+
+    QRect startButton;
+    QRect musicButton;
+    QRect backButton;
+    QRect bagButton;
+    QRect exitButton;
+    QRect volumeButton;
+    int h;
+    int w;
+    int logicalW;
+    int logicalH;
+
+    QVector<QRect> uiButtons;
+    QVector<QString> uiTexts;
+
+    QPixmap menuBackground;
+    bool menuBgReady = false;
+
+    // ⭐ 删除了 initUI() 声明
+    bool showInventory = false;
+    bool showExitMenu = false;
+    bool showVolumePanel = false;
+    void applyVolume();
+
+    int bgmVolume = 50;
+
+    QMediaPlayer *bgmPlayer = nullptr;
+    QAudioOutput *audioOutput = nullptr;
+
+    // =========================================================
+    // 渲染 & 工具
+    // =========================================================
+    QPixmap renderGameFrame();
+    QImage blurImage(const QImage &source, int radius = 6);
+
+    int getFarmIndex(int x, int y);
+    void openDoor(int tx, int ty);
+};
+
+#endif
